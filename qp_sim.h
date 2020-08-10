@@ -4,6 +4,7 @@
 #include <qpOASES.hpp>
 #include <Eigen.h>
 #include <math.h>
+#include <MemoryFree.h>
 
 #define DEBUG
 #define PI 3.14159265359
@@ -26,7 +27,7 @@
 /* ================================= MPC Control Parameters ================================== */    
 #define n 3 //number of states
 #define m 3 //number of inputs
-#define N 15 //Batch size
+#define N 10 //Batch size
 #define Qs 5 //state weight
 #define Rs 1 //input weight
 
@@ -58,32 +59,16 @@ float state_const_mag = 0.008;
 Eigen::VectorXd thr_state(6);    
 
 //slip constraint
-Eigen::VectorXd mu(3);    
+Eigen::VectorXd mu(n);    
 
 //initial state : [x y theta]
-Eigen::VectorXd x0(3);    
+Eigen::VectorXd x0(n);    
 
 qpOASES::Options options;
-qpOASES::int_t nWSR = 10;
+qpOASES::int_t nWSR = 100;
 
-qpOASES::real_t xOpt[2];
+qpOASES::real_t xOpt[n];
 
-//eigen library
-Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> H_eigen(2,2);
-Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> F_eigen(1,2);
-Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> G_eigen(2,1);
-Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> wl_input_eigen(2,1);
-Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> wu_input_eigen(2,1);
-Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> wl_eigen(1,1);
-Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> wu_eigen(1,1);
-
-qpOASES::real_t* H = H_eigen.data();       
-qpOASES::real_t* F = F_eigen.data();       
-qpOASES::real_t* G = G_eigen.data();       
-qpOASES::real_t* wl_input = wl_input_eigen.data();       
-qpOASES::real_t* wu_input = wu_input_eigen.data();       
-qpOASES::real_t* wl = wl_eigen.data();       
-qpOASES::real_t* wu = wu_eigen.data();       
 
 
 /* ================================= Simulation Parameters ================================== */    
@@ -91,9 +76,9 @@ Eigen::ArrayXd t;
 Eigen::ArrayXd x_ref, y_ref, theta_ref;
 Eigen::ArrayXd dx_ref, dy_ref, dtheta_ref;
 Eigen::ArrayXd ddx_ref, ddy_ref, ddtheta_ref;
-Eigen::ArrayXXd xr(1301, 3);
-Eigen::ArrayXXd ur(1301, 3);
-Eigen::ArrayXXd ddxr(1301, 3);
+Eigen::ArrayXXd xr(1301, n);
+Eigen::ArrayXXd ur(1301, m);
+Eigen::ArrayXXd ddxr(1301, n);
 
 Eigen::MatrixXd A(n,n);
 Eigen::MatrixXd B(n,m);
@@ -108,6 +93,32 @@ Eigen::VectorXd ddx_state(n);
 
 uint32_t cur_state;
 
+Eigen::MatrixXd Sx(n*N,n);
+Eigen::MatrixXd Su(n*N,m*N);
+Eigen::MatrixXd Qb(n*N, n*N);
+Eigen::MatrixXd Rb(m*N, m*N);
+
+
+//eigen library
+
+Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> H_eigen(m*N,m*N);
+Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> F_eigen(n,m*N);
+Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> Y_eigen(n,n);
+
+//Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> G_eigen(2,1);
+//Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> wl_input_eigen(2,1);
+//Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> wu_input_eigen(2,1);
+//Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> wl_eigen(1,1);
+//Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> wu_eigen(1,1);
+
+qpOASES::real_t* H_qp = H_eigen.data();       
+qpOASES::real_t* F_qp = F_eigen.data();       
+qpOASES::real_t* Y_qp = Y_eigen.data();       
+//qpOASES::real_t* G_qp = G_eigen.data();       
+//qpOASES::real_t* wl_input_qp = wl_input_eigen.data();       
+//qpOASES::real_t* wu_input_qp = wu_input_eigen.data();       
+//qpOASES::real_t* wl_qp = wl_eigen.data();       
+//qpOASES::real_t* wu_qp = wu_eigen.data();       
 
 #endif // TURTLEBOT3_WITH_OPEN_MANIPULATOR_CONFIG_H_
 

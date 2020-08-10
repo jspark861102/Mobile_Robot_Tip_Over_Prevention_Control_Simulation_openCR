@@ -53,8 +53,12 @@ void setup() {
 
     cur_state = 853;
     /* --------------------------------------------------------------------------------------- */
+    Serial.println(freeMemory());
 
     Batch_formulation();
+
+    Serial.println(freeMemory());
+
     
     //u_tilt_set, x_tilt_set
     //Q, R to local
@@ -72,14 +76,10 @@ void loop() {
     if ((t_millis-tTime) >= 1000 ) { 
         uint32_t t_QP_start = micros();      
     /* ================================= qpOASES Simulation Start!!!!============================ */  
-        
-    
+          
         
 
         //Batch_formulation();
-
-
-
 
 
         if (cur_state >= t.size()) cur_state = 0;
@@ -113,8 +113,8 @@ Eigen::Matrix3d multipleA(u_int32_t c_state, u_int32_t f_state) {
 
 void Batch_formulation(void) {    
     /* ================================= Sx{n*N,n} ================================== */    
-    //block<rows, cols>(i,j) --> (i:i+rows-1, j:j+cols-1)
-    Eigen::MatrixXd Sx(n*N,n);
+    ////block<rows, cols>(i,j) --> (i:i+rows-1, j:j+cols-1)
+    ////Eigen::MatrixXd Sx(n*N,n);
     Sx.setZero(n*N,n);
 
     Sx.block(0, 0, 3, 3) = A_from_ref(ur(cur_state,0), ur(cur_state,1), xr(cur_state,2));       
@@ -123,10 +123,10 @@ void Batch_formulation(void) {
     /* --------------------------------------------------------------------------------------- */
 
     /* ================================= Su{n*N,m*N} ================================== */    
-    //block<rows, cols>(i,j) --> (i:i+rows-1, j:j+cols-1)
-    Eigen::MatrixXd Su(n*N,m*N);
+    ////block<rows, cols>(i,j) --> (i:i+rows-1, j:j+cols-1)    
+    ////Eigen::MatrixXd Su(n*N,m*N);
     Su.setZero(n*N,m*N);
-
+    
     Eigen::MatrixXd At(n,n);
     for (int ii = 1; ii < N+1; ++ii)   { 
         for (int jj = 1; jj < N+1; ++jj) {    
@@ -139,72 +139,129 @@ void Batch_formulation(void) {
 
             Su.block((ii-1)*n, (jj-1)*m, n, m) = At * B_from_ref(xr(cur_state + (jj-1),2));           
         }
-    }
+    }    
     /* --------------------------------------------------------------------------------------- */
 
+    /* ================================= Qb{n*N,n*N} ================================== */   
+    ////Eigen::MatrixXd Qb(n*N, n*N);
+    Qb.setZero(n*N, n*N);
 
+    for (int ii = 0; ii < N; ++ii)    
+        Qb.block(ii*n, ii*n, n, n) = Qs*Eigen::MatrixXd::Identity(n,n);        
+    /* --------------------------------------------------------------------------------------- */
 
+    /* ================================= Rb{m*N,m*N} ================================== */       
+    ////Eigen::MatrixXd Rb(m*N, m*N);
+    Rb.setZero(m*N, m*N);
 
+    for (int ii = 0; ii < N; ++ii)    
+        Rb.block(ii*m, ii*m, m, m) = Rs*Eigen::MatrixXd::Identity(m,m);                
+    /* --------------------------------------------------------------------------------------- */
 
+    /* ================================= H(m*N,m*N) ================================== */   
+    H_eigen.setZero(m*N, m*N);
+    
+    H_eigen = Su.transpose() * Qb * Su + Rb; 
+    /* --------------------------------------------------------------------------------------- */
 
-//큐비알비부터 !!
+    /* ================================= F(n,m*N) ================================== */   
+    F_eigen.setZero(n, m*N);
+    
+    F_eigen = Sx.transpose() * Qb * Su; 
+    /* --------------------------------------------------------------------------------------- */
 
-/*    
+    /* ================================= Y(n,n) ================================== */   
+    Y_eigen.setZero(n, n);
+    
+    Y_eigen = Sx.transpose() * Qb * Sx; 
+    /* --------------------------------------------------------------------------------------- */
+
+    /* ================================= print ================================== */   
+    /*
     for (int kk = 0 ; kk < n*N; ++kk) {
         Serial.print(Su(kk,0)); Serial.print(" "); Serial.print(Su(kk,1)); Serial.print(" "); Serial.println(Su(kk,2));                 
     }
     Serial.println(" ");
-*/
-    
-    
-
-   
-    
-    /*
-    Sx = np.zeros((A.shape[0],A.shape[0],N))
-    Sx = A[:,:,cur_state]
-    for i in generator(1, N):
-        Sx = np.append(Sx, multipleA(A,cur_state,cur_state+i), axis =0)
-
-    #Su{n*N,m*N}
-    Su = np.zeros((n*N,m*N))
-    for i in generator(1, N+1):
-        for j in generator(1, N+1):    
-            if i-j < 0: #upper than diagonal 
-                At = np.zeros((n,n))
-            elif i-j == 0: #diagonal
-                At = np.eye(n)
-            else: #i-j>0
-                At = multipleA(A,cur_state+1,cur_state+(i-j))            
-            
-            Su[(i-1)*n : i*n , (j-1)*m : j*m] = np.matmul(At, B[:,:,cur_state + (j-1)] )
-    
-    #Qb{n*N,n*N}
-    Q_dummy = Q.copy()
-    for i in generator(2,N+1):    
-        Qb = block_diag(Q_dummy,Q)    
-        Q_dummy = Qb
-    
-    #Rb{m*N,m*N}
-    R_dummy = R.copy()
-    for i in generator(2,N+1):    
-        Rb = block_diag(R_dummy,R)
-        R_dummy = Rb
     */
     
+    for (int ii = 0 ; ii < n*N; ++ii) {
+        for (int jj = 0 ; jj < n; ++jj) {
+            if (jj == n - 1)
+                Serial.println(Sx(ii,jj));
+            else
+                Serial.print(Sx(ii,jj)); Serial.print(" ");    
+        }
+    }
+    Serial.println(" ");
+
+    
+    for (int ii = 0 ; ii < n*N; ++ii) {
+        for (int jj = 0 ; jj < m*N; ++jj) {
+            if (jj == m*N - 1)
+                Serial.println(Su(ii,jj));
+            else
+                Serial.print(Su(ii,jj)); Serial.print(" ");    
+        }
+    }
+    Serial.println(" ");
     
     
-    /*
-    H = np.matmul(np.matmul(Su.T, Qb), Su) + Rb
-    F = np.matmul(np.matmul(Sx.T, Qb), Su) 
-    Y = np.matmul(np.matmul(Sx.T, Qb), Sx)  
-    */
+    for (int ii = 0 ; ii < n*N; ++ii) {
+        for (int jj = 0 ; jj < n*N; ++jj) {
+            if (jj == n*N - 1)
+                Serial.println(Qb(ii,jj));
+            else
+                Serial.print(Qb(ii,jj)); Serial.print(" ");    
+        }
+    }
+    Serial.println(" ");
 
 
+    for (int ii = 0 ; ii < m*N; ++ii) {
+        for (int jj = 0 ; jj < m*N; ++jj) {
+            if (jj == m*N - 1)
+                Serial.println(Rb(ii,jj));
+            else
+                Serial.print(Rb(ii,jj)); Serial.print(" ");    
+        }
+    }
+    Serial.println(" ");
+
+        
+    for (int ii = 0 ; ii < m*N; ++ii) {
+        for (int jj = 0 ; jj < m*N; ++jj) {
+            if (jj == m*N - 1)
+                Serial.println(H_eigen(ii,jj));
+            else
+                Serial.print(H_eigen(ii,jj)); Serial.print(" ");    
+        }
+    }
+    Serial.println(" ");
+
+    for (int ii = 0 ; ii < n; ++ii) {
+        for (int jj = 0 ; jj < m*N; ++jj) {
+            if (jj == m*N - 1)
+                Serial.println(F_eigen(ii,jj));
+            else
+                Serial.print(F_eigen(ii,jj)); Serial.print(" ");    
+        }
+    }
+    Serial.println(" ");
+
+    for (int ii = 0 ; ii < n; ++ii) {
+        for (int jj = 0 ; jj < n; ++jj) {
+            if (jj == n - 1)
+                Serial.println(Y_eigen(ii,jj));
+            else
+                Serial.print(Y_eigen(ii,jj)); Serial.print(" ");    
+        }
+    }
+    Serial.println(" ");
+    
+    
+    Serial.println(freeMemory());    
+    /* --------------------------------------------------------------------------------------- */
 }
-
-
-
 
 //Normalize to [-180,180):
 inline double constrainAngle(double x){
