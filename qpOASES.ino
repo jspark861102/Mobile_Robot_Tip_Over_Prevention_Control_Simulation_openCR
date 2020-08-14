@@ -1,5 +1,7 @@
 #include <qp_sim.h>
 
+// ============================================== setup ============================================================ //        
+// ---------------------------------------------------------------------------------------------------------------- //
 void setup() {    
     Serial.begin(115200);
     while(!Serial) {}
@@ -21,7 +23,7 @@ void setup() {
 
 
     // ================================= Reference trajectory ================================== //
-    //reference trajectory xr=[x_ref, y_ref, theta_ref], ur=[dx_ref, dy_ref, dtheta_ref]
+    //reference trajectory xr=[x_ref, y_ref, theta_ref], ur=[dx_ref, dy_ref, dtheta_ref]//
     if (REF_TRAJ_SWITCH == 1){        
     }
     else if (REF_TRAJ_SWITCH == 2) {
@@ -30,55 +32,104 @@ void setup() {
     // --------------------------------------------------------------------------------------- //
 
     // ================================= initial parameters ================================== //
-    Eigen::Vector3d xr0;
-    //xr0 << xr(0,0), xr(0,1), xr(0,2);
+    Eigen::Vector3d xr0;    
     xr0 << pgm_read_float_far(&xr[0][0])/10000, pgm_read_float_far(&xr[0][1])/10000, pgm_read_float_far(&xr[0][2])/10000;
     x0_tilt = x0 - xr0;    
+    x_tilt_current << x0_tilt;
+
+    u_tilt.setZero(n,1);
+    u.setZero(m,1);
+    x_state.setZero(n,1);
+    dx_state.setZero(n,1);
+    ddx_state.setZero(n,1);
+    x_tilt_m1.setZero(n,1);
+    x_tilt_m1_dummy.setZero(n,1);
 
     cur_state = 853;
     // --------------------------------------------------------------------------------------- //    
     uint32_t t_b_start = micros();      
     Batch_formulation();
     uint32_t t_b_end = micros();
-    uint32_t t_b = t_b_end - t_b_start;
-    Serial.println(t_b);    
+    uint32_t t_b = t_b_end - t_b_start;    
+    Serial.print("ellapsed time of QP in setup = ");  Serial.print(t_b);  Serial.println("usec");
+    Serial.println(" ");        
     
-    //u_tilt_set, x_tilt_set
-    //Q, R to local
+    //u_tilt_set, x_tilt_set    
     //DF,Dr,Lf,Lr --> let's use as a scalar D and L    
 }
 
+// ============================================== loop ============================================================ //        
+// ================================================================================================================ //        
 void loop() {    
-    uint32_t t_millis = millis();
+    //control time
+    uint32_t t_millis = millis();    
     
-    //uint32_t t_q_start = micros();          
     // ================================= qpOASES Definition ================================== //
+    //uint32_t t_q_start = micros();          
     static qpOASES::SQProblem qptest(m*N, (n-1)*N);    //define only once       
     //qptest.setOptions( options );   
-    // --------------------------------------------------------------------------------------- //
     //uint32_t t_q_end = micros();
     //uint32_t t_q = t_q_end - t_q_start;
     //Serial.println(t_q);
-    
+    // --------------------------------------------------------------------------------------- //       
 
-    if ((t_millis-tTime) >= 1000 ) { 
+    if ((t_millis-tTime) >= 1000 ) { //control with sampling time 1000msec
         uint32_t t_QP_start = micros();      
-    // ================================= qpOASES Simulation Start!!!!============================ //  
-          
-        
+    
+    // ==================================== Batch formulation ================================= //           
+    Batch_formulation(); //define Sx, Su, Qb, Rb, H, F, Y//
+    // --------------------------------------------------------------------------------------- //       
 
-        Batch_formulation();
+
+    // ============================= -1 states for zmp constraint ============================ //           
+    if (cur_state == 0 || cur_state == 1) x_tilt_m1 << x0_tilt;
+    else                                  x_tilt_m1 << x_tilt_m1_dummy;    
+    // --------------------------------------------------------------------------------------- //       
+    
+    // =================== if object is slipped, zmp bound is fluctuated===================== //
+    if (SWITCH_SlIP == 0) { //when the slip is not considered
+        if (ddx_state[0] > mu[0]*g) {
+            Df = D * 0.5;
+            Dr = D * 1.5;
+        }
+        else if (ddx_state[0] < -mu[0]*g) {
+            Df = D * 1.5;
+            Dr = D * 0.5;
+        }
+
+        if (ddx_state[1] > mu[1]*g) {
+            Lf = L * 0.2;
+            Lr = L * 1.8;
+        }
+        else if (ddx_state[1] < -mu[1]*g) {
+            Lf = L * 1.8;
+            Lr = L * 0.2;
+        }
+    }
+    // ------------------------------------------------------------------------------------ //       
+
+    // ================================= QP constraints =================================== //           
+    QP_Constraints_fast(); //define G, wl_input, wu_input, wl_eigen, wu_eigen//
+    // --------------------------------------------------------------------------------------- //       
 
 
-        if (cur_state >= sizeof(t)/sizeof(float)) cur_state = 0;
+
+
+
+
+
+
+
+
+
+        if (cur_state >= sizeof(t)/sizeof(float)) cur_state = 0; //reset when the simulation is finished
         else cur_state = ++cur_state;
         // --------------------------------------------------------------------------------------- //
 
         uint32_t t_QP_end = micros();
         uint32_t t_QP = t_QP_end - t_QP_start;
         Serial.print("ellapsed time of QP = ");  Serial.print(t_QP);  Serial.println("usec");
-        Serial.println(" ");
-        
+        Serial.println(" ");        
         
         // ================================= LED Check ================================== //
         if (trigger == 1) {digitalWrite(LED_BUILTIN, HIGH); trigger = 0;}
@@ -89,11 +140,178 @@ void loop() {
     }       
 }
 
+Eigen::Matrix3d A_hat(uint32_t cur_state, uint32_t final_state) {
+    Eigen::Matrix3d result_Ahat; 
+    
+    result_Ahat = multipleA(cur_state, final_state-1);
+    return result_Ahat;
+}
+
+Eigen::MatrixXd B_hat(uint32_t cur_state, uint32_t final_state) {
+    uint32_t  del_fc;
+    del_fc = final_state - cur_state;
+
+    Serial.println(del_fc);
+
+    Eigen::MatrixXd result_Bhat;     
+    result_Bhat.setZero(n, m * del_fc);    
+    
+    //because 3dimensional matrix is unavailble with eigen library, (n*del_fc, m) is used instead of (n, m, del_fc)//
+    for (int ii = del_fc; ii > 0; --ii)   { 
+        if (ii == del_fc) result_Bhat.block(0, (ii-1)*m, n, m) = B_from_ref(pgm_read_float_far(&xr[final_state -1][2])/10000);  
+        else result_Bhat.block(0, (ii-1)*n, n, m) = multipleA(cur_state+ii, final_state-1) * B_from_ref(pgm_read_float_far(&xr[cur_state+ii-1][2])/10000);  
+    }
+
+    Serial.println(result_Bhat.size());
+    return result_Bhat;
+}
+
+void QP_Constraints_fast(void) {    
+    Eigen::Matrix<double, n-1, n> P;
+    P << 1/(T*T),         0, 0, 
+               0,   1/(T*T), 0; 
+    // ============================ backward finite difference for zmp ========================= //
+    if (SWITCH_ZMP == 1) {
+
+        //Eigen::Matrix<double, n, m*N> test;
+        Eigen::MatrixXd test;
+        test = B_hat(cur_state, cur_state + N);
+
+        Serial.println(test.size());
+
+
+    /*
+        for (int ii = 0 ; ii < n; ++ii) {
+            for (int jj = 0 ; jj < m*N; ++jj) {
+                if (jj == m*N - 1)
+                    Serial.println(test(ii,jj));
+                else
+                    Serial.print(test(ii,jj)); Serial.print(" ");    
+            }
+        }
+        Serial.println(" ");
+*/
+
+
+        /*
+        //G0 = {(n-1)*N, m*N}//     
+        Eigen::Matrix<double, (n-1)*N, m*N> G0;
+        
+        Eigen::Matrix<double, n*N, m*N> Bhat; //(n ,m*N) is appeded through row line
+        Bhat.setZero(n*N, m*N);
+        for (int b_hat_num = 1; b_hat_num < N+1; ++b_hat_num)
+            Bhat.block((b_hat_num-1)*n, 0, n, m*b_hat_num) = B_hat(cur_state, cur_state + b_hat_num);
+
+
+
+        for (int ii = 0 ; ii < n*N; ++ii) {
+            for (int jj = 0 ; jj < m*N; ++jj) {
+                if (jj == m*N - 1)
+                    Serial.println(Bhat(ii,jj));
+                else
+                    Serial.print(Bhat(ii,jj)); Serial.print(" ");    
+            }
+        }
+        Serial.println(" ");
+        */
+
+        /*
+        for (int ii = 1; ii < N+1; ++ii)   { 
+            for (int jj = 1; jj < N+1; ++jj)   { 
+                if (ii-jj == 0) //diagonal                    
+                    G0.block((ii-1)*(n-1), (jj-1)*m, n-1, m) = P * Bhat.block((ii-1)*n, (jj-1)*m, n, m);                     
+                else if (ii-jj == 1) //one lower than diagonal//
+                    G0.block((ii-1)*(n-1), (jj-1)*m, n-1, m) = P * Bhat.block((ii-1)*n, (jj-1)*m, n, m) + P * -2*Bhat.block((ii-1-1)*n, (jj-1)*m, n, m);
+                else if (ii-jj < 0) //upper diagonal is 0//     
+                    G0.block((ii-1)*(n-1), (jj-1)*m, n-1, m) = Eigen::MatrixXd::Zero(n-1,m);
+                else //lower diagonal//      
+                    G0.block((ii-1)*(n-1), (jj-1)*m, n-1, m) = P * Bhat.block((ii-1)*n, (jj-1)*m, n, m) + P * (-2*Bhat.block((ii-1-1)*n, (jj-1)*m, n, m) + Bhat.block((ii-1-2)*n, (jj-1)*m, n, m));
+            }        
+        }
+
+
+        
+
+        for (int ii = 0 ; ii < (n-1)*N; ++ii) {
+            for (int jj = 0 ; jj < m*N; ++jj) {
+                if (jj == m*N - 1)
+                    Serial.println(G0(ii,jj));
+                else
+                    Serial.print(G0(ii,jj)); Serial.print(" ");    
+            }
+        }
+        Serial.println(" ");
+        */
+    
+
+
+        /*
+        //Bhat = np.zeros((N, n, m, N))          
+        for b_hat_num in generator(1, N+1):    
+            #in writing Bi(k+j), in code Bj(k+i), 
+            #(1,2,3,4), 1:j, (2,3):B(:,:), 4:b_hat_num
+            Bhat[b_hat_num-1, :, :, :b_hat_num] = hat.B_hat(A,B,cur_state, cur_state+b_hat_num)            
+
+        G01 = np.zeros(((n-1)*N, m*N))
+        for i in generator(1, N+1):    
+            for j in generator(1, N+1):    
+                if i-j == 0: #diagonal                    
+                    G01[(i-1)*(n-1) : i*(n-1), (j-1)*m : j*m] = np.matmul( P, Bhat[i-1,:,:,j-1] )                    
+                     
+                elif i-j == 1: #one lower than diagonal                     
+                    G01[(i-1)*(n-1) : i*(n-1), (j-1)*m : j*m] = np.matmul( P, Bhat[i-1,:,:,j-1] ) + np.matmul( P, -2*Bhat[i-1-1,:,:,j-1] )
+
+                elif i-j < 0: #upper diagonal is 0                    
+                    G01[(i-1)*(n-1) : i*(n-1), (j-1)*m : j*m] = 0
+
+                else: #lower diagonal                    
+                    G01[(i-1)*(n-1) : i*(n-1), (j-1)*m : j*m] = np.matmul(P, Bhat[i-1,:,:,j-1]) + np.matmul(P, -2*Bhat[i-1-1,:,:,j-1] + Bhat[i-1-2,:,:,j-1])                      
+                    
+        #G0 = np.append(G01,-G01, axis=0)
+        G0 = G01.copy()
+        */
+
+
+    }
+
+    else {        
+
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /*
+    for (int ii = 0 ; ii < n-1; ++ii) {
+        for (int jj = 0 ; jj < n; ++jj) {
+            if (jj == n - 1)
+                Serial.println(P(ii,jj));
+            else
+                Serial.print(P(ii,jj)); Serial.print(" ");    
+        }
+    }
+    */
+
+
+
+
+
+}
+
 void Batch_formulation(void) {    
     // ================================= Sx{n*N,n} ================================== //        
-    Sx.setZero(n*N,n);
-
-    //Sx.block(0, 0, 3, 3) = A_from_ref(ur(cur_state,0), ur(cur_state,1), xr(cur_state,2));       
+    Sx.setZero(n*N,n);    
     Sx.block(0, 0, 3, 3) = A_from_ref(pgm_read_float_far(&ur[cur_state][0])/10000, pgm_read_float_far(&ur[cur_state][1])/10000, pgm_read_float_far(&xr[cur_state][2])/10000);       
     for (int kk = 1; kk < N; ++kk)    
         Sx.block(n*kk, 0, n, n) = multipleA(cur_state, cur_state + kk);          
@@ -110,9 +328,7 @@ void Batch_formulation(void) {
             else if (ii -jj == 0) //diagonal
                 At.setIdentity(n,n);
             else //ii-jj>0
-                At = multipleA(cur_state+1, cur_state + (ii-jj));
-
-            //Su.block((ii-1)*n, (jj-1)*m, n, m) = At * B_from_ref(xr(cur_state + (jj-1),2));           
+                At = multipleA(cur_state+1, cur_state + (ii-jj));            
             Su.block((ii-1)*n, (jj-1)*m, n, m) = At * B_from_ref(pgm_read_float_far(&xr[cur_state + (jj-1)][2])/10000);                
         }
     }    
@@ -145,13 +361,13 @@ void Batch_formulation(void) {
     // --------------------------------------------------------------------------------------- //
 
     // ================================= Y(n,n) ================================== //   
-    Y_eigen.setZero(n, n);
+    //Y_eigen.setZero(n, n);
     
-    Y_eigen = Sx.transpose() * Qb * Sx; 
+    //Y_eigen = Sx.transpose() * Qb * Sx; 
     // --------------------------------------------------------------------------------------- //
     
-    
     // ================================= print ================================== //       
+    /*
     for (int ii = 0 ; ii < n*N; ++ii) {
         for (int jj = 0 ; jj < n; ++jj) {
             if (jj == n - 1)
@@ -216,15 +432,16 @@ void Batch_formulation(void) {
     }
     Serial.println(" ");
 
-    for (int ii = 0 ; ii < n; ++ii) {
-        for (int jj = 0 ; jj < n; ++jj) {
-            if (jj == n - 1)
-                Serial.println(Y_eigen(ii,jj));
-            else
-                Serial.print(Y_eigen(ii,jj)); Serial.print(" ");    
-        }
-    }
+    //for (int ii = 0 ; ii < n; ++ii) {
+    //    for (int jj = 0 ; jj < n; ++jj) {
+    //        if (jj == n - 1)
+    //            Serial.println(Y_eigen(ii,jj));
+    //        else
+    //            Serial.print(Y_eigen(ii,jj)); Serial.print(" ");    
+    //    }
+    //}
     Serial.println(" ");   
+    */
     // --------------------------------------------------------------------------------------- //
     
 }
@@ -240,8 +457,6 @@ Eigen::Matrix3d multipleA(u_int32_t c_state, u_int32_t f_state) {
     }
     return multiple_A;
 }
-
-
 
 // ================================= unwrap ============================================================ //        
 //Normalize to [-180,180):
@@ -264,7 +479,6 @@ inline double angleDiff(double a,double b){
 inline double unwrap(double previousAngle,double newAngle){
     return previousAngle - angleDiff(newAngle,angleConv(previousAngle));
 }
-
 
 // ================================= System matrix ============================================================ //        
 //for i in range(0, len(t)):    
