@@ -45,17 +45,13 @@ void setup() {
     x_tilt_m1.setZero(n,1);
     x_tilt_m1_dummy.setZero(n,1);
 
-    cur_state = 853;
+    Df = D; Dr = D;
+    Lf = L; Lr = L;
+
+    cur_state = 0;    
+    //cur_state = 853;    
+    //cur_state = 1285;    
     // --------------------------------------------------------------------------------------- //    
-    uint32_t t_b_start = micros();      
-    Batch_formulation();
-    uint32_t t_b_end = micros();
-    uint32_t t_b = t_b_end - t_b_start;    
-    Serial.print("ellapsed time of QP in setup = ");  Serial.print(t_b);  Serial.println("usec");
-    Serial.println(" ");        
-    
-    //u_tilt_set, x_tilt_set    
-    //DF,Dr,Lf,Lr --> let's use as a scalar D and L    
 }
 
 // ============================================== loop ============================================================ //        
@@ -64,82 +60,167 @@ void loop() {
     //control time
     uint32_t t_millis = millis();    
     
-    // ================================= qpOASES Definition ================================== //
-    //uint32_t t_q_start = micros();          
-    static qpOASES::SQProblem qptest(m*N, (n-1)*N);    //define only once       
-    //qptest.setOptions( options );   
-    //uint32_t t_q_end = micros();
-    //uint32_t t_q = t_q_end - t_q_start;
-    //Serial.println(t_q);
+    // ================================= qpOASES Definition ================================== //     
+    //static qpOASES::SQProblem MPC(m*N, (n-1)*N);    //define only once    
+    //MPC.setOptions( options );       
     // --------------------------------------------------------------------------------------- //       
 
     if ((t_millis-tTime) >= 1000 ) { //control with sampling time 1000msec
+        Serial.print("cur_state = "); Serial.println(cur_state);        
+
+        // ================================= qpOASES Definition ================================== //     
+        qpOASES::SQProblem MPC(m*N, (n-1)*N);    //define only once    
+        //MPC.setOptions( options );       
+        // --------------------------------------------------------------------------------------- //  
+
         uint32_t t_QP_start = micros();      
     
-    // ==================================== Batch formulation ================================= //           
-    Batch_formulation(); //define Sx, Su, Qb, Rb, H, F, Y//
-    // --------------------------------------------------------------------------------------- //       
+        // ==================================== Batch formulation ================================= //                           
+        Serial.println("Batch_formulation start");
+        Batch_formulation(); //define Sx, Su, Qb, Rb, H, F, Y//
+        Serial.println("Batch_formulation end");                
+        // --------------------------------------------------------------------------------------- //   
 
-
-    // ============================= -1 states for zmp constraint ============================ //           
-    if (cur_state == 0 || cur_state == 1) x_tilt_m1 << x0_tilt;
-    else                                  x_tilt_m1 << x_tilt_m1_dummy;    
-    // --------------------------------------------------------------------------------------- //       
-    
-    // =================== if object is slipped, zmp bound is fluctuated===================== //
-    if (SWITCH_SlIP == 0) { //when the slip is not considered
-        if (ddx_state[0] > mu[0]*g) {
-            Df = D * 0.5;
-            Dr = D * 1.5;
+        // ============================= -1 states for zmp constraint ============================ //           
+        if (cur_state == 0 || cur_state == 1) x_tilt_m1 << x0_tilt;
+        else                                  x_tilt_m1 << x_tilt_m1_dummy;  
+        Serial.print("x_tilt_m1 = "); Serial.print(x_tilt_m1(0,0)); Serial.print(" "); Serial.print(x_tilt_m1(1,0)); Serial.print(" "); Serial.println(x_tilt_m1(2,0));               
+        // --------------------------------------------------------------------------------------- //       
+        
+        // =================== if object is slipped, zmp bound is fluctuated===================== //
+        if (SWITCH_SLIP == 0) { //when the slip is not considered
+            if (ddx_state[0] > mu[0]*g) {
+                Df = D * 0.5;
+                Dr = D * 1.5;
+            }
+            else if (ddx_state[0] < -mu[0]*g) {
+                Df = D * 1.5;
+                Dr = D * 0.5;
+            }
+                                                                        //need to modified like Df = Df *1.5
+            if (ddx_state[1] > mu[1]*g) {
+                Lf = L * 0.2;
+                Lr = L * 1.8;
+            }
+            else if (ddx_state[1] < -mu[1]*g) {
+                Lf = L * 1.8;
+                Lr = L * 0.2;
+            }
+            Serial.println("if loop for SWTICH_SLIP=0");                
         }
-        else if (ddx_state[0] < -mu[0]*g) {
-            Df = D * 1.5;
-            Dr = D * 0.5;
+        // ------------------------------------------------------------------------------------ //       
+
+        // ================================= QP constraints =================================== //                               
+        Serial.println("constraint_start");                
+        QP_Constraints_fast(); //define G, wl_input, wu_input, wl_eigen, wu_eigen//            
+        Serial.println("constraint_end");                                    
+        // ------------------------------------------------------------------------------------ //       
+        
+        // ==================================== QP MPC ======================================== //           
+        Serial.println("F_w_computation start");                
+        Ft_x_eigen = 2 * F_eigen.adjoint() * x_tilt_current;
+        wl_E_x = wl + E * x_tilt_current; //the results are different from MATLAB, E has numerical diffenrence!!!!!!!!!!!!!!!!!!!!!!!!!1       
+        wu_E_x = wu + E * x_tilt_current; //the results are different from MATLAB, E has numerical diffenrence!!!!!!!!!!!!!!!!!!!!!!!!!1       
+        Serial.println("F_w_computation end");                
+
+        if (init_case == 1) {            
+            Serial.println("init");                
+            init_case = 2;           
+
+            qpOASES::returnValue rvalue;
+
+            nWSR = 100;
+            //cputime = 1;
+            rvalue = MPC.init( H_qp, Ft_x_qp, G_qp, wl_input_qp, wu_input_qp, wl_E_x_qp, wu_E_x_qp, nWSR);                
+            Serial.print("rvalue = "); Serial.println(rvalue);
+            Serial.print("nWSR = ");  Serial.println(nWSR);
+            //Serial.print("cputime = ");  Serial.println(cputime*1.0e12);
+            Serial.println("init_end");                        
         }
+        
+        else if (init_case == 2) {        
+            Serial.println("hotstart");                
 
-        if (ddx_state[1] > mu[1]*g) {
-            Lf = L * 0.2;
-            Lr = L * 1.8;
-        }
-        else if (ddx_state[1] < -mu[1]*g) {
-            Lf = L * 1.8;
-            Lr = L * 0.2;
-        }
-    }
-    // ------------------------------------------------------------------------------------ //       
+            qpOASES::returnValue rvalue;
 
-    // ================================= QP constraints =================================== //           
-    QP_Constraints_fast(); //define G, wl_input, wu_input, wl_eigen, wu_eigen//
-    // --------------------------------------------------------------------------------------- //       
+            nWSR = 100; 
+            //cputime = 1;           
+            //rvalue = MPC.hotstart( H_qp, Ft_x_qp, G_qp, wl_input_qp, wu_input_qp, wl_E_x_qp, wu_E_x_qp, nWSR);                            
+            rvalue = MPC.init( H_qp, Ft_x_qp, G_qp, wl_input_qp, wu_input_qp, wl_E_x_qp, wu_E_x_qp, nWSR);                            
+            Serial.print("rvalue = "); Serial.println(rvalue);
+            Serial.print("nWSR = ");  Serial.println(nWSR);
+            //Serial.print("cputime = ");  Serial.println(cputime*1.0e12);
+            Serial.println("hotstart_end");                
+        } 
+                 
+        MPC.getPrimalSolution( u_tilt_qp );  
 
+        Serial.print("u_tilt = "); Serial.print(u_tilt_qp[0]); Serial.print(" "); Serial.print(u_tilt_qp[1]);  Serial.print(" "); Serial.println(u_tilt_qp[2]);         
+        
+        // ------------------------------------------------------------------------------------ //       
 
+        // ========================= applying input to plant ================================== //                               
+        Eigen::Matrix<double, m, 1> ur_ref;
+        Eigen::Matrix<double, n, 1> xr_ref;
+        Eigen::Matrix<double, n, 1> xr_ref_next;
+        ur_ref << pgm_read_float_far(&ur[cur_state][0])/10000, pgm_read_float_far(&ur[cur_state][1])/10000, pgm_read_float_far(&ur[cur_state][2])/10000;
+        xr_ref << pgm_read_float_far(&xr[cur_state][0])/10000, pgm_read_float_far(&xr[cur_state][1])/10000, pgm_read_float_far(&xr[cur_state][2])/10000;
+        xr_ref_next << pgm_read_float_far(&xr[cur_state+1][0])/10000, pgm_read_float_far(&xr[cur_state+1][1])/10000, pgm_read_float_far(&xr[cur_state+1][2])/10000;
+               
+        x_tilt_m1_dummy = x_tilt_current;
+        u_tilt << u_tilt_qp[0], u_tilt_qp[1], u_tilt_qp[2];
 
+        u = u_tilt + ur_ref;
+        x_state = x_tilt_current + xr_ref;
 
+        if (MODEL_SWITCH == 1) { //nonlinear model
+            if (cur_state < 1301-N-1) {  
+                dx_state << u(0,0)*cos(x_state(2,0))-u(1,0)*sin(x_state(2,0)),
+                            u(0,0)*sin(x_state(2,0))+u(1,0)*cos(x_state(2,0)),
+                            u(2,0); //backward derivative    
+                
+                Eigen::Matrix<double, n, 1> x_state_next;
+                x_state_next = x_state + dx_state*T;    //backward derivative
+                x_tilt_current = x_state_next - xr_ref_next;
+            }
+        }        
+        else if (MODEL_SWITCH == 2) { //linear model
+            if (cur_state < 1301-N-1) {
+                Eigen::Matrix<double, n, 1> x_tilt_current_next;                
+                Eigen::Matrix<double, n, 1> dx_state_next;                
 
-
-
-
-
-
-
-        if (cur_state >= sizeof(t)/sizeof(float)) cur_state = 0; //reset when the simulation is finished
-        else cur_state = ++cur_state;
-        // --------------------------------------------------------------------------------------- //
-
+                x_tilt_current_next =  A_from_ref(pgm_read_float_far(&ur[cur_state][0])/10000, pgm_read_float_far(&ur[cur_state][1])/10000, pgm_read_float_far(&xr[cur_state][2])/10000) * x_tilt_current
+                                      +B_from_ref(pgm_read_float_far(&xr[cur_state][2])/10000) *u_tilt;                             
+                
+                dx_state_next = ( ( x_tilt_current_next+xr_ref_next ) - x_state )/T;  //backward derivative
+                ddx_state = (dx_state_next - dx_state)/T;
+                x_tilt_current = x_tilt_current_next;
+                dx_state = dx_state_next;
+            }
+        }                
+        // ------------------------------------------------------------------------------------ //               
+        
+        if (cur_state == 1301 - N - 1) {
+            cur_state = 0; //reset when the simulation is finished
+            Serial.println("Simulation is finished");
+        } 
+        else cur_state = cur_state+1;                            
+        
         uint32_t t_QP_end = micros();
         uint32_t t_QP = t_QP_end - t_QP_start;
         Serial.print("ellapsed time of QP = ");  Serial.print(t_QP);  Serial.println("usec");
-        Serial.println(" ");        
+        Serial.println(" ");               
         
         // ================================= LED Check ================================== //
         if (trigger == 1) {digitalWrite(LED_BUILTIN, HIGH); trigger = 0;}
         else {digitalWrite(LED_BUILTIN, LOW); trigger = 1;}       
         // --------------------------------------------------------------------------------------- //
 
-        tTime = t_millis;        
+        tTime = t_millis;               
     }       
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
 Eigen::Matrix3d A_hat(uint32_t cur_state, uint32_t final_state) {
     Eigen::Matrix3d result_Ahat; 
     
@@ -151,8 +232,6 @@ Eigen::MatrixXd B_hat(uint32_t cur_state, uint32_t final_state) {
     uint32_t  del_fc;
     del_fc = final_state - cur_state;
 
-    Serial.println(del_fc);
-
     Eigen::MatrixXd result_Bhat;     
     result_Bhat.setZero(n, m * del_fc);    
     
@@ -161,8 +240,6 @@ Eigen::MatrixXd B_hat(uint32_t cur_state, uint32_t final_state) {
         if (ii == del_fc) result_Bhat.block(0, (ii-1)*m, n, m) = B_from_ref(pgm_read_float_far(&xr[final_state -1][2])/10000);  
         else result_Bhat.block(0, (ii-1)*n, n, m) = multipleA(cur_state+ii, final_state-1) * B_from_ref(pgm_read_float_far(&xr[cur_state+ii-1][2])/10000);  
     }
-
-    Serial.println(result_Bhat.size());
     return result_Bhat;
 }
 
@@ -170,52 +247,23 @@ void QP_Constraints_fast(void) {
     Eigen::Matrix<double, n-1, n> P;
     P << 1/(T*T),         0, 0, 
                0,   1/(T*T), 0; 
-    // ============================ backward finite difference for zmp ========================= //
-    if (SWITCH_ZMP == 1) {
 
-        //Eigen::Matrix<double, n, m*N> test;
-        Eigen::MatrixXd test;
-        test = B_hat(cur_state, cur_state + N);
-
-        Serial.println(test.size());
-
-
-    /*
-        for (int ii = 0 ; ii < n; ++ii) {
-            for (int jj = 0 ; jj < m*N; ++jj) {
-                if (jj == m*N - 1)
-                    Serial.println(test(ii,jj));
-                else
-                    Serial.print(test(ii,jj)); Serial.print(" ");    
-            }
-        }
-        Serial.println(" ");
-*/
-
-
-        /*
-        //G0 = {(n-1)*N, m*N}//     
-        Eigen::Matrix<double, (n-1)*N, m*N> G0;
-        
+    // =================================== Bhat{n*N,m*N} ===================================== //  
         Eigen::Matrix<double, n*N, m*N> Bhat; //(n ,m*N) is appeded through row line
         Bhat.setZero(n*N, m*N);
+    if (SWITCH_ZMP == 1 ||  SWITCH_STATE == 1) {    
         for (int b_hat_num = 1; b_hat_num < N+1; ++b_hat_num)
             Bhat.block((b_hat_num-1)*n, 0, n, m*b_hat_num) = B_hat(cur_state, cur_state + b_hat_num);
+        // --------------------------------------------------------------------------------------- //      
+    }
+    // --------------------------------------------------------------------------------------- //
 
-
-
-        for (int ii = 0 ; ii < n*N; ++ii) {
-            for (int jj = 0 ; jj < m*N; ++jj) {
-                if (jj == m*N - 1)
-                    Serial.println(Bhat(ii,jj));
-                else
-                    Serial.print(Bhat(ii,jj)); Serial.print(" ");    
-            }
-        }
-        Serial.println(" ");
-        */
-
-        /*
+    // ============================ backward finite difference for zmp ========================= //
+    // ----------------------------------------------------------------------------------------- //
+    if (SWITCH_ZMP == 1) {
+        // ================================== G0{(n-1)*N, m*N} =================================== //  
+        Eigen::Matrix<double, (n-1)*N, m*N> G0;       
+        
         for (int ii = 1; ii < N+1; ++ii)   { 
             for (int jj = 1; jj < N+1; ++jj)   { 
                 if (ii-jj == 0) //diagonal                    
@@ -227,86 +275,124 @@ void QP_Constraints_fast(void) {
                 else //lower diagonal//      
                     G0.block((ii-1)*(n-1), (jj-1)*m, n-1, m) = P * Bhat.block((ii-1)*n, (jj-1)*m, n, m) + P * (-2*Bhat.block((ii-1-1)*n, (jj-1)*m, n, m) + Bhat.block((ii-1-2)*n, (jj-1)*m, n, m));
             }        
+        }                 
+        // --------------------------------------------------------------------------------------- //
+
+        // ================================== E0{(n-1)*N,n} ===================================== //  
+        Eigen::Matrix<double, (n-1)*N, n> E0;       
+
+        for (int ii = 1; ii < N+1; ++ii)   { 
+            if (ii == 1)                     
+                E0.block((ii-1)*(n-1), 0, n-1, n) = P * A_hat(cur_state, cur_state+ii) + P * -2*Eigen::MatrixXd::Identity(n,n);
+            else if (ii == 2)
+                E0.block((ii-1)*(n-1), 0, n-1, n) = P * A_hat(cur_state, cur_state+ii) + P * (-2*A_hat(cur_state, cur_state+(ii-1)) + Eigen::MatrixXd::Identity(n,n));
+            else
+                E0.block((ii-1)*(n-1), 0, n-1, n) = P * A_hat(cur_state, cur_state+ii) + P * (-2*A_hat(cur_state, cur_state+(ii-1)) + A_hat(cur_state, cur_state+(ii-2)));
+
         }
+        E0 = -E0;     
+        // --------------------------------------------------------------------------------------- //
 
-
+        // ================================= w0u & w0l {(n-1)*N} ================================= //  
+        Eigen::Matrix<double, (n-1), n> thr_zmp_angle;        
+        Eigen::Matrix<double, n, 1> thr_zmp_mag_f;
+        Eigen::Matrix<double, n, 1> thr_zmp_mag_r;
+        Eigen::Matrix<double, (n-1), 1> thr_zmp_f;
+        Eigen::Matrix<double, (n-1), 1> thr_zmp_r;
         
+        thr_zmp_angle << fabs(cos(x_tilt_current(2,1)+pgm_read_float_far(&xr[cur_state][2])/10000)),  fabs(sin(x_tilt_current(2,1)+pgm_read_float_far(&xr[cur_state][2])/10000)),  0,
+                         fabs(sin(x_tilt_current(2,1)+pgm_read_float_far(&xr[cur_state][2])/10000)),  fabs(cos(x_tilt_current(2,1)+pgm_read_float_far(&xr[cur_state][2])/10000)),  0,        
+        thr_zmp_mag_f << (Df/2)*g/h, (Lf/2)*g/h, 0;
+        thr_zmp_mag_r << (Dr/2)*g/h, (Lr/2)*g/h, 0;
 
-        for (int ii = 0 ; ii < (n-1)*N; ++ii) {
-            for (int jj = 0 ; jj < m*N; ++jj) {
-                if (jj == m*N - 1)
-                    Serial.println(G0(ii,jj));
-                else
-                    Serial.print(G0(ii,jj)); Serial.print(" ");    
+        thr_zmp_f = thr_zmp_angle * thr_zmp_mag_f;
+        thr_zmp_r = thr_zmp_angle * thr_zmp_mag_r;
+
+        Eigen::Matrix<double, (n-1), 1> ddxr_i;
+        Eigen::Matrix<double, (n-1)*N, 1> w0l;       
+        Eigen::Matrix<double, (n-1)*N, 1> w0u;   
+
+        if (SWITCH_SLIP == 1) {
+            for (int ii = 1; ii < N+1; ++ii)   {
+                ddxr_i << pgm_read_float_far(&ddxr[cur_state+ii][0])/10000, pgm_read_float_far(&ddxr[cur_state+ii][1])/10000;      
+                w0u.block((ii-1)*(n-1), 0, n-1, 1) =   thr_zmp_f.array().min( mu.array().segment(0,2) * g ) - ddxr_i.array();
+                w0l.block((ii-1)*(n-1), 0, n-1, 1) = - thr_zmp_r.array().min( mu.array().segment(0,2) * g ) - ddxr_i.array();
+            }
+        }  
+        else if (SWITCH_SLIP == 0) {
+            for (int ii = 1; ii < N+1; ++ii)   {
+                ddxr_i << pgm_read_float_far(&ddxr[cur_state+ii][0])/10000, pgm_read_float_far(&ddxr[cur_state+ii][1])/10000; 
+                w0u.block((ii-1)*(n-1), 0, n-1, 1) =   thr_zmp_f.array() - ddxr_i.array();
+                w0l.block((ii-1)*(n-1), 0, n-1, 1) = - thr_zmp_r.array() - ddxr_i.array();
+            }           
+        }    
+        Eigen::Matrix<double, (n-1)*N, 1> x_tilt_minus_one;
+        x_tilt_minus_one.setZero((n-1)*N,1);
+        x_tilt_minus_one.block(0,0,n-1,1) = P * x_tilt_m1;
+
+        w0u = w0u - x_tilt_minus_one;
+        w0l = w0l - x_tilt_minus_one;     
+        // ----------------------------------------------------------------------------------------- // 
+
+        G << G0;
+        E << E0;
+        wl << w0l;
+        wu << w0u;       
+    }    
+
+    // ===================================== state limit ======================================= //
+    // ----------------------------------------------------------------------------------------- //
+    if (SWITCH_STATE == 1) {
+        // ================================== G2{n*N, m*N} =================================== //  
+        Eigen::Matrix<double, n*N, m*N> G2;     
+        G2.setZero(n*N, m*N);        
+        
+        for (int ii = 1; ii < N+1; ++ii)   { 
+            for (int jj = 1; jj < ii+1; ++jj)   { 
+                G2.block((ii-1)*n, (jj-1)*m, n, m) = Bhat.block((ii-1)*n, (jj-1)*m, n, m);   
             }
         }
-        Serial.println(" ");
-        */
-    
+        // ---------------------------------------------------------------------------------- //        
 
+        // ================================== E2{n*N,n} ===================================== //  
+        Eigen::Matrix<double, n*N, n> E2;     
 
-        /*
-        //Bhat = np.zeros((N, n, m, N))          
-        for b_hat_num in generator(1, N+1):    
-            #in writing Bi(k+j), in code Bj(k+i), 
-            #(1,2,3,4), 1:j, (2,3):B(:,:), 4:b_hat_num
-            Bhat[b_hat_num-1, :, :, :b_hat_num] = hat.B_hat(A,B,cur_state, cur_state+b_hat_num)            
-
-        G01 = np.zeros(((n-1)*N, m*N))
-        for i in generator(1, N+1):    
-            for j in generator(1, N+1):    
-                if i-j == 0: #diagonal                    
-                    G01[(i-1)*(n-1) : i*(n-1), (j-1)*m : j*m] = np.matmul( P, Bhat[i-1,:,:,j-1] )                    
-                     
-                elif i-j == 1: #one lower than diagonal                     
-                    G01[(i-1)*(n-1) : i*(n-1), (j-1)*m : j*m] = np.matmul( P, Bhat[i-1,:,:,j-1] ) + np.matmul( P, -2*Bhat[i-1-1,:,:,j-1] )
-
-                elif i-j < 0: #upper diagonal is 0                    
-                    G01[(i-1)*(n-1) : i*(n-1), (j-1)*m : j*m] = 0
-
-                else: #lower diagonal                    
-                    G01[(i-1)*(n-1) : i*(n-1), (j-1)*m : j*m] = np.matmul(P, Bhat[i-1,:,:,j-1]) + np.matmul(P, -2*Bhat[i-1-1,:,:,j-1] + Bhat[i-1-2,:,:,j-1])                      
-                    
-        #G0 = np.append(G01,-G01, axis=0)
-        G0 = G01.copy()
-        */
-
-
-    }
-
-    else {        
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    /*
-    for (int ii = 0 ; ii < n-1; ++ii) {
-        for (int jj = 0 ; jj < n; ++jj) {
-            if (jj == n - 1)
-                Serial.println(P(ii,jj));
-            else
-                Serial.print(P(ii,jj)); Serial.print(" ");    
+        for (int ii = 1; ii < N+1; ++ii)   { 
+            E2.block((ii-1)*n, 0, n, n) = multipleA(cur_state, cur_state + (ii-1));
         }
-    }
-    */
+        E2 = -E2;
+        // ---------------------------------------------------------------------------------- //        
+        
+        // ================================= w2u & w2l {n*N} ================================= //  
+        Eigen::Matrix<double, n*N, 1> w2l;       
+        Eigen::Matrix<double, n*N, 1> w2u;  
 
+        for (int ii = 1; ii < N+1; ++ii)   { 
+            w2u.block((ii-1)*n, 0, n, 1) =   thr_state.block(0,0,n,1);
+            w2l.block((ii-1)*n, 0, n, 1) =  -thr_state.block(n,0,n,1);
+        }
+        // ---------------------------------------------------------------------------------- //        
 
+        G << G2;
+        E << E2;
+        wl << w2l;
+        wu << w2u;
+    }    
+    
+    // ===================================== input limit ======================================= //
+    // ----------------------------------------------------------------------------------------- //
+    if (SWITCH_INPUT == 1) {
+        Eigen::Matrix<double, n*N, 1> w1l;
+        Eigen::Matrix<double, n*N, 1> w1u;
 
+        for (int ii = 1; ii < N+1; ++ii)   {
+            w1u.block((ii-1)*n, 0, n, 1) =  thr_input.block(0,0,n,1);
+            w1l.block((ii-1)*n, 0, n, 1) = -thr_input.block(n,0,n,1);        
+        }
 
-
+        wu_input << w1u;
+        wl_input << w1l;      
+    }   
 }
 
 void Batch_formulation(void) {    
@@ -364,86 +450,7 @@ void Batch_formulation(void) {
     //Y_eigen.setZero(n, n);
     
     //Y_eigen = Sx.transpose() * Qb * Sx; 
-    // --------------------------------------------------------------------------------------- //
-    
-    // ================================= print ================================== //       
-    /*
-    for (int ii = 0 ; ii < n*N; ++ii) {
-        for (int jj = 0 ; jj < n; ++jj) {
-            if (jj == n - 1)
-                Serial.println(Sx(ii,jj));
-            else
-                Serial.print(Sx(ii,jj)); Serial.print(" ");    
-        }
-    }
-    Serial.println(" ");
-
-    
-    for (int ii = 0 ; ii < n*N; ++ii) {
-        for (int jj = 0 ; jj < m*N; ++jj) {
-            if (jj == m*N - 1)
-                Serial.println(Su(ii,jj));
-            else
-                Serial.print(Su(ii,jj)); Serial.print(" ");    
-        }
-    }
-    Serial.println(" ");
-    
-    
-    for (int ii = 0 ; ii < n*N; ++ii) {
-        for (int jj = 0 ; jj < n*N; ++jj) {
-            if (jj == n*N - 1)
-                Serial.println(Qb(ii,jj));
-            else
-                Serial.print(Qb(ii,jj)); Serial.print(" ");    
-        }
-    }
-    Serial.println(" ");
-
-
-    for (int ii = 0 ; ii < m*N; ++ii) {
-        for (int jj = 0 ; jj < m*N; ++jj) {
-            if (jj == m*N - 1)
-                Serial.println(Rb(ii,jj));
-            else
-                Serial.print(Rb(ii,jj)); Serial.print(" ");    
-        }
-    }
-    Serial.println(" ");
-
-        
-    for (int ii = 0 ; ii < m*N; ++ii) {
-        for (int jj = 0 ; jj < m*N; ++jj) {
-            if (jj == m*N - 1)
-                Serial.println(H_eigen(ii,jj));
-            else
-                Serial.print(H_eigen(ii,jj)); Serial.print(" ");    
-        }
-    }
-    Serial.println(" ");
-
-    for (int ii = 0 ; ii < n; ++ii) {
-        for (int jj = 0 ; jj < m*N; ++jj) {
-            if (jj == m*N - 1)
-                Serial.println(F_eigen(ii,jj));
-            else
-                Serial.print(F_eigen(ii,jj)); Serial.print(" ");    
-        }
-    }
-    Serial.println(" ");
-
-    //for (int ii = 0 ; ii < n; ++ii) {
-    //    for (int jj = 0 ; jj < n; ++jj) {
-    //        if (jj == n - 1)
-    //            Serial.println(Y_eigen(ii,jj));
-    //        else
-    //            Serial.print(Y_eigen(ii,jj)); Serial.print(" ");    
-    //    }
-    //}
-    Serial.println(" ");   
-    */
-    // --------------------------------------------------------------------------------------- //
-    
+    // --------------------------------------------------------------------------------------- //    
 }
 
 // ================================= multipleA ============================================================ //        

@@ -24,8 +24,8 @@
 #define MODEL_SWITCH  2 //model, 1:nonlinear model, 2:linear model          
 #define REF_TRAJ_SWITCH 2 //reference trajectory, 1:wv, 2:xy                
 #define SWITCH_ZMP 1 //zmp constraint, 1:on 0:off                         
-#define SWITCH_SlIP 0 //friction constraint, 1:on 0:off                    
-#define SWTICH_INPUT 1 //input constraint, 1:on 0:off                      
+#define SWITCH_SLIP 1 //friction constraint, 1:on 0:off                    
+#define SWITCH_INPUT 1 //input constraint, 1:on 0:off                      
 #define SWITCH_STATE 0 //state constraint, 1:on 0:off                       
 
 // ================================= Kinematic Parameters ================================== //    
@@ -34,11 +34,85 @@
 #define h 0.6 // height of mass center
 
 // ================================= MPC Control Parameters ================================== //    
+#define N 10 //Batch size
+
 #define n 3 //number of states
 #define m 3 //number of inputs
-#define N 10 //Batch size
+
 #define Qs 5 //state weight
 #define Rs 1 //input weight
+
+//input constraint
+float input_const_mag = 2.0;
+Eigen::Matrix<double, n*2, 1> thr_input;    
+
+//state constraint
+float state_const_mag = 0.008;
+Eigen::Matrix<double, n*2, 1> thr_state;    
+
+//slip constraint
+Eigen::Matrix<double, n, 1> mu;    
+
+//initial state : [x y theta]
+Eigen::Matrix<double, n, 1> x0;    
+
+float Df, Dr, Lf, Lr;
+
+qpOASES::Options options;
+qpOASES::int_t nWSR = 100;
+
+//states//
+Eigen::Matrix<double, n, 1> x0_tilt;
+Eigen::Matrix<double, m, 1> u_tilt;
+Eigen::Matrix<double, n, 1> x_tilt_current;
+Eigen::Matrix<double, m, 1> u;
+Eigen::Matrix<double, n, 1> x_state;
+Eigen::Matrix<double, n, 1> dx_state;
+Eigen::Matrix<double, n, 1> ddx_state;
+Eigen::Matrix<double, n, 1> x_tilt_m1;
+Eigen::Matrix<double, n, 1> x_tilt_m1_dummy;
+
+//batch formulation matrices//
+Eigen::Matrix<double, n*N, n  > Sx;
+Eigen::Matrix<double, n*N, m*N> Su;
+Eigen::Matrix<double, n*N, n*N> Qb;
+Eigen::Matrix<double, m*N, m*N> Rb;
+
+Eigen::Matrix<double, m*N, m*N, Eigen::RowMajor> H_eigen;
+Eigen::Matrix<double, n,   m*N, Eigen::RowMajor> F_eigen;
+//Eigen::Matrix<double, n,   n  > Y_eigen;
+
+//MPC constraints// ////qpOASES read list with rowmajor way
+Eigen::Matrix<double, (n-1)*N*SWITCH_ZMP + n*N*SWITCH_STATE , m*N*(SWITCH_ZMP+SWITCH_STATE), Eigen::RowMajor> G;       
+Eigen::Matrix<double, (n-1)*N*SWITCH_ZMP + n*N*SWITCH_STATE , n, Eigen::RowMajor> E;   
+Eigen::Matrix<double, (n-1)*N*SWITCH_ZMP + n*N*SWITCH_STATE , 1> wl;   
+Eigen::Matrix<double, (n-1)*N*SWITCH_ZMP + n*N*SWITCH_STATE , 1> wu;   
+Eigen::Matrix<double, n*N , 1> wl_input;   
+Eigen::Matrix<double, n*N , 1> wu_input;  
+
+Eigen::Matrix<double, m*N, 1> Ft_x_eigen;
+Eigen::Matrix<double, (n-1)*N*SWITCH_ZMP + n*N*SWITCH_STATE , 1> wl_E_x;   
+Eigen::Matrix<double, (n-1)*N*SWITCH_ZMP + n*N*SWITCH_STATE , 1> wu_E_x;   
+
+//qpOASES parameters
+qpOASES::real_t* H_qp = H_eigen.data();       
+qpOASES::real_t* Ft_x_qp = Ft_x_eigen.data();       
+//qpOASES::real_t* Y_qp = Y_eigen.data();       
+qpOASES::real_t* G_qp = G.data();
+qpOASES::real_t* wl_E_x_qp = wl_E_x.data();
+qpOASES::real_t* wu_E_x_qp = wu_E_x.data();
+qpOASES::real_t* wl_input_qp = wl_input.data();
+qpOASES::real_t* wu_input_qp = wu_input.data();
+
+qpOASES::real_t u_tilt_qp[m];      
+qpOASES::real_t cputime;
+
+
+// ================================= Simulation Parameters ================================== //    
+uint32_t cur_state;
+uint32_t tTime;
+uint8_t trigger = 0;
+uint8_t init_case = 1;
 
 // ================================= functions ================================== //    
 //void ref_trajectory_mecanum_xy(void);
@@ -58,80 +132,7 @@ void QP_Constraints_fast(void);
 Eigen::Matrix3d A_hat(uint32_t cur_state, uint32_t final_state); 
 Eigen::MatrixXd B_hat(uint32_t cur_state, uint32_t final_state);
 
-// ================================= MPC Control Parameters ================================== //    
-uint32_t tTime;
-uint8_t trigger = 0;
-uint8_t init_case = 1;
-
-//input constraint
-float input_const_mag = 2.0;
-Eigen::Matrix<double, n*2, 1> thr_input;    
-
-//state constraint
-float state_const_mag = 0.008;
-Eigen::Matrix<double, n*2, 1> thr_state;    
-
-//slip constraint
-Eigen::Matrix<double, n, 1> mu;    
-
-//initial state : [x y theta]
-Eigen::Matrix<double, n, 1> x0;    
-
-uint32_t Df, Dr, Lf, Lr;
-
-qpOASES::Options options;
-qpOASES::int_t nWSR = 100;
-
-// ================================= Simulation Parameters ================================== //    
-//current_state for simulation//
-uint32_t cur_state;
-
-//simulation states//
-Eigen::Matrix<double, n, 1> x0_tilt;
-Eigen::Matrix<double, m, 1> u_tilt;
-Eigen::Matrix<double, n, 1> x_tilt_current;
-Eigen::Matrix<double, m, 1> u(m);
-Eigen::Matrix<double, n, 1> x_state(n);
-Eigen::Matrix<double, n, 1> dx_state(n);
-Eigen::Matrix<double, n, 1> ddx_state(n);
-Eigen::Matrix<double, n, 1> x_tilt_m1;
-Eigen::Matrix<double, n, 1> x_tilt_m1_dummy;
-
-//system parameters//
-//Eigen::Matrix<double, n, n  > A;
-//Eigen::Matrix<double, n, m  > B;
-
-//batch formulation matrices//
-Eigen::Matrix<double, n*N, n  > Sx;
-Eigen::Matrix<double, n*N, m*N> Su;
-Eigen::Matrix<double, n*N, n*N> Qb;
-Eigen::Matrix<double, m*N, m*N> Rb;
-
-Eigen::Matrix<double, m*N, m*N> H_eigen;
-Eigen::Matrix<double, n,   m*N> F_eigen;
-//Eigen::Matrix<double, n,   n  > Y_eigen;
-
-qpOASES::real_t* H_qp = H_eigen.data();       
-qpOASES::real_t* F_qp = F_eigen.data();       
-//qpOASES::real_t* Y_qp = Y_eigen.data();       
-
-//MPC constraints//
-//Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> G_eigen(2,1);
-//Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> wl_input_eigen(2,1);
-//Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> wu_input_eigen(2,1);
-//Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> wl_eigen(1,1);
-//Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic,Eigen::RowMajor> wu_eigen(1,1);
-
-//qpOASES::real_t* G_qp = G_eigen.data();       
-//qpOASES::real_t* wl_input_qp = wl_input_eigen.data();       
-//qpOASES::real_t* wu_input_qp = wu_input_eigen.data();       
-//qpOASES::real_t* wl_qp = wl_eigen.data();       
-//qpOASES::real_t* wu_qp = wu_eigen.data();       
-
-//qpOASES output//
-//qpOASES::real_t xOpt[n];
-
-#endif // TURTLEBOT3_WITH_OPEN_MANIPULATOR_CONFIG_H_
+#endif 
 
 
 
