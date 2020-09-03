@@ -29,6 +29,7 @@
  *	\date 2007-2017
  */
 
+//#define __USE_SINGLE_PRECISION__
 
 #if defined(__SINGLE_OBJECT__) || defined(__C_WRAPPER__)
 

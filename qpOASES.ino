@@ -4,7 +4,9 @@
 // ---------------------------------------------------------------------------------------------------------------- //
 void setup() {    
     Serial.begin(115200);
+#ifdef DEBUG
     while(!Serial) {}
+#endif
     pinMode(LED_BUILTIN, OUTPUT); 
 
     // ================================= parameters setting ================================== //
@@ -31,8 +33,7 @@ void setup() {
     }    
     // --------------------------------------------------------------------------------------- //
 
-    // ================================= initial parameters ================================== //
-    Eigen::Vector3d xr0;    
+    // ================================= initial parameters ================================== //    
     xr0 << pgm_read_float_far(&xr[0][0])/10000, pgm_read_float_far(&xr[0][1])/10000, pgm_read_float_far(&xr[0][2])/10000;
     x0_tilt = x0 - xr0;    
     x_tilt_current << x0_tilt;
@@ -48,9 +49,7 @@ void setup() {
     Df = D; Dr = D;
     Lf = L; Lr = L;
 
-    cur_state = 0;    
-    //cur_state = 853;    
-    //cur_state = 1285;    
+    cur_state = 0;        
     // --------------------------------------------------------------------------------------- //    
 }
 
@@ -62,29 +61,32 @@ void loop() {
     
     // ================================= qpOASES Definition ================================== //     
     //static qpOASES::SQProblem MPC(m*N, (n-1)*N);    //define only once    
+    //options.setToMPC(); // the accuracy of results should be verified
+    //options.printLevel = qpOASES::PL_LOW;
     //MPC.setOptions( options );       
     // --------------------------------------------------------------------------------------- //       
 
-    if ((t_millis-tTime) >= 1000 ) { //control with sampling time 1000msec
+    if ((t_millis-tTime) >= SAMPLING_RATE ) { //control with sampling time 
+        uint32_t t_QP_start = micros();      
+#ifdef DEBUG
         Serial.print("cur_state = "); Serial.println(cur_state);        
+#endif        
 
         // ================================= qpOASES Definition ================================== //     
         qpOASES::SQProblem MPC(m*N, (n-1)*N);    //define only once    
+        //options.setToMPC(); // the accuracy of results should be verified
+        //options.printLevel = qpOASES::PL_LOW;
         //MPC.setOptions( options );       
-        // --------------------------------------------------------------------------------------- //  
-
-        uint32_t t_QP_start = micros();      
+        // --------------------------------------------------------------------------------------- //          
     
-        // ==================================== Batch formulation ================================= //                           
-        Serial.println("Batch_formulation start");
-        Batch_formulation(); //define Sx, Su, Qb, Rb, H, F, Y//
-        Serial.println("Batch_formulation end");                
+        // ==================================== Batch formulation ================================= //                                   
+        if (init_case == 1)
+        Batch_formulation(); //define Sx, Su, Qb, Rb, H, F, Y//        
         // --------------------------------------------------------------------------------------- //   
 
         // ============================= -1 states for zmp constraint ============================ //           
         if (cur_state == 0 || cur_state == 1) x_tilt_m1 << x0_tilt;
-        else                                  x_tilt_m1 << x_tilt_m1_dummy;  
-        Serial.print("x_tilt_m1 = "); Serial.print(x_tilt_m1(0,0)); Serial.print(" "); Serial.print(x_tilt_m1(1,0)); Serial.print(" "); Serial.println(x_tilt_m1(2,0));               
+        else                                  x_tilt_m1 << x_tilt_m1_dummy;          
         // --------------------------------------------------------------------------------------- //       
         
         // =================== if object is slipped, zmp bound is fluctuated===================== //
@@ -105,58 +107,35 @@ void loop() {
             else if (ddx_state[1] < -mu[1]*g) {
                 Lf = L * 1.8;
                 Lr = L * 0.2;
-            }
-            Serial.println("if loop for SWTICH_SLIP=0");                
+            }            
         }
         // ------------------------------------------------------------------------------------ //       
 
-        // ================================= QP constraints =================================== //                               
-        Serial.println("constraint_start");                
-        QP_Constraints_fast(); //define G, wl_input, wu_input, wl_eigen, wu_eigen//            
-        Serial.println("constraint_end");                                    
+        // ================================= QP constraints =================================== //                                       
+        if (init_case == 1)
+        QP_Constraints_fast(); //define G, wl_input, wu_input, wl_eigen, wu_eigen//                    
         // ------------------------------------------------------------------------------------ //       
         
-        // ==================================== QP MPC ======================================== //           
-        Serial.println("F_w_computation start");                
+        // ==================================== QP MPC ======================================== //                   
         Ft_x_eigen = 2 * F_eigen.adjoint() * x_tilt_current;
         wl_E_x = wl + E * x_tilt_current; //the results are different from MATLAB, E has numerical diffenrence!!!!!!!!!!!!!!!!!!!!!!!!!1       
-        wu_E_x = wu + E * x_tilt_current; //the results are different from MATLAB, E has numerical diffenrence!!!!!!!!!!!!!!!!!!!!!!!!!1       
-        Serial.println("F_w_computation end");                
-
-        if (init_case == 1) {            
-            Serial.println("init");                
-            init_case = 2;           
-
-            qpOASES::returnValue rvalue;
-
-            nWSR = 100;
-            //cputime = 1;
-            rvalue = MPC.init( H_qp, Ft_x_qp, G_qp, wl_input_qp, wu_input_qp, wl_E_x_qp, wu_E_x_qp, nWSR);                
-            Serial.print("rvalue = "); Serial.println(rvalue);
-            Serial.print("nWSR = ");  Serial.println(nWSR);
-            //Serial.print("cputime = ");  Serial.println(cputime*1.0e12);
-            Serial.println("init_end");                        
-        }
+        wu_E_x = wu + E * x_tilt_current; //the results are different from MATLAB, E has numerical diffenrence!!!!!!!!!!!!!!!!!!!!!!!!!1                       
         
-        else if (init_case == 2) {        
-            Serial.println("hotstart");                
-
-            qpOASES::returnValue rvalue;
-
-            nWSR = 100; 
-            //cputime = 1;           
-            //rvalue = MPC.hotstart( H_qp, Ft_x_qp, G_qp, wl_input_qp, wu_input_qp, wl_E_x_qp, wu_E_x_qp, nWSR);                            
-            rvalue = MPC.init( H_qp, Ft_x_qp, G_qp, wl_input_qp, wu_input_qp, wl_E_x_qp, wu_E_x_qp, nWSR);                            
-            Serial.print("rvalue = "); Serial.println(rvalue);
-            Serial.print("nWSR = ");  Serial.println(nWSR);
-            //Serial.print("cputime = ");  Serial.println(cputime*1.0e12);
-            Serial.println("hotstart_end");                
-        } 
-                 
+        nWSR = 100;
+        //cputime = 0.01;
+        rvalue = MPC.init( H_qp, Ft_x_qp, G_qp, wl_input_qp, wu_input_qp, wl_E_x_qp, wu_E_x_qp, nWSR);                
         MPC.getPrimalSolution( u_tilt_qp );  
+        //MPC.reset();
+        init_case = 1;        
 
-        Serial.print("u_tilt = "); Serial.print(u_tilt_qp[0]); Serial.print(" "); Serial.print(u_tilt_qp[1]);  Serial.print(" "); Serial.println(u_tilt_qp[2]);         
-        
+#ifdef DEBUG
+        Serial.print("rvalue = "); Serial.println(rvalue);
+        Serial.print("nWSR = ");  Serial.println(nWSR);
+        //Serial.print("cputime = ");  Serial.println(cputime*1.0e12);                   
+        //Serial.print("u_tilt = "); Serial.print(u_tilt_qp[0]); Serial.print(" "); Serial.print(u_tilt_qp[1]);  Serial.print(" "); Serial.println(u_tilt_qp[2]);         
+        Serial.print(u_tilt_qp[0]); Serial.print(" "); Serial.print(u_tilt_qp[1]);  Serial.print(" "); Serial.println(u_tilt_qp[2]);         
+#endif   
+               
         // ------------------------------------------------------------------------------------ //       
 
         // ========================= applying input to plant ================================== //                               
@@ -202,14 +181,19 @@ void loop() {
         
         if (cur_state == 1301 - N - 1) {
             cur_state = 0; //reset when the simulation is finished
+            x0_tilt = x0 - xr0;    
+            x_tilt_current << x0_tilt;
             Serial.println("Simulation is finished");
+            delay(1000);
         } 
         else cur_state = cur_state+1;                            
         
         uint32_t t_QP_end = micros();
         uint32_t t_QP = t_QP_end - t_QP_start;
+#ifdef DEBUG
         Serial.print("ellapsed time of QP = ");  Serial.print(t_QP);  Serial.println("usec");
         Serial.println(" ");               
+#endif   
         
         // ================================= LED Check ================================== //
         if (trigger == 1) {digitalWrite(LED_BUILTIN, HIGH); trigger = 0;}
@@ -465,28 +449,6 @@ Eigen::Matrix3d multipleA(u_int32_t c_state, u_int32_t f_state) {
     return multiple_A;
 }
 
-// ================================= unwrap ============================================================ //        
-//Normalize to [-180,180):
-inline double constrainAngle(double x){
-    x = fmod(x + PI,2*PI);
-    if (x < 0)
-        x += 2*PI;
-    return x - PI;
-}
-// convert to [-360,360]
-inline double angleConv(double angle){
-    return fmod(constrainAngle(angle),2*PI);
-}
-inline double angleDiff(double a,double b){
-    double dif = fmod(b - a + PI,2*PI);
-    if (dif < 0)
-        dif += 2*PI;
-    return dif - PI;
-}
-inline double unwrap(double previousAngle,double newAngle){
-    return previousAngle - angleDiff(newAngle,angleConv(previousAngle));
-}
-
 // ================================= System matrix ============================================================ //        
 //for i in range(0, len(t)):    
 //    A[:,:,i]= np.eye(3) + np.array([ [0, 0, (-ur[0][i]*np.sin(xr[2][i]) - ur[1][i]*np.cos(xr[2][i]))*T],
@@ -516,153 +478,3 @@ Eigen::Matrix3d B_from_ref(double theta_ref_index) {
     
     return Br;   
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-/*
-void ref_trajectory_mecanum_xy(void) {
-
-    // ================================= reference trajectory ================================== //        
-    //double* tb = LinearSpacedArray(0, 10, std::size_t(10/dt + 1) ).data();
-    //Eigen::VectorXd tb = Eigen::VectorXd::Map(LinearSpacedArray(0, 10, std::size_t(10/dt + 1) ).data(), LinearSpacedArray(0, 10, std::size_t(10/dt + 1) ).size());    
-    //Eigen::Matrix<double, int(10/dt + 1), 1> tb = Eigen::Matrix<double, int(10/dt + 1), 1>::Map(LinearSpacedArray(0, 10, std::size_t(10/dt + 1) ).data());    
-    //Eigen::Array<double, int(10/dt + 1), 1> tb = Eigen::Array<double, int(10/dt + 1), 1>::Map(LinearSpacedArray(0, 10, std::size_t(10/dt + 1) ).data());    
-    //Eigen::Array<double, int((10+3)/dt + 1), 1> t = Eigen::Array<double, int((10+3)/dt + 1), 1>::Map(LinearSpacedArray(0, (10+3), std::size_t((10+3)/dt + 1) ).data());    
-    // --------------------------------------------------------------------------------------- //
-
-
-    // ================================= time ================================== //
-    t = Eigen::ArrayXd::LinSpaced(int((10+3)/dt + 1), 0, 13);        
-    Eigen::ArrayXd tb = Eigen::ArrayXd::LinSpaced(int(10/dt + 1), 0, 10); 
-
-    //static PROGMEM  float* ttt  = (int32_t*)t.data();                      
-    // --------------------------------------------------------------------------------------- //
-
-   
-    // ================================= dx_ref ================================== //
-    uint8_t num = 19;    
-    uint8_t start_point = int((3*(1/T)-2*(num+1)/2)/2);
-    Eigen::ArrayXd damping_profile = Eigen::ArrayXd::LinSpaced(int(0.5*num)+1, 0, 0.4737);        
-    
-    //Eigen::ArrayXd dx_ref(sizeof(tt)/sizeof(float));    
-    dx_ref.setZero(sizeof(tt)/sizeof(float));       
-    dx_ref.segment(start_point,              10        ) =  1.0*2*PI/10*(cos(2*PI*damping_profile)/2-0.5);    
-    dx_ref.segment(start_point+10,           tb.size() ) = -1.0*2*PI/10*cos(2*PI*tb/10);    
-    dx_ref.segment(start_point+10+tb.size(), 10        ) =  1.0*2*PI/10*(-cos(2*PI*damping_profile)/2-0.5);        
-    // --------------------------------------------------------------------------------------- //
-
- 
-    // ================================= dy_ref ================================== //
-    //Eigen::ArrayXd dy_ref(sizeof(tt)/sizeof(float));
-    dy_ref.setZero(sizeof(tt)/sizeof(float));       
-    dy_ref.segment(start_point,              10        ) =  1.0*4*PI/10*(cos(2*PI*damping_profile )/2-0.5);    
-    dy_ref.segment(start_point+10,           tb.size() ) = -1.0*4*PI/10*cos(4*PI*tb/10);    
-    dy_ref.segment(start_point+10+tb.size(), 10        ) =  1.0*4*PI/10*(-cos(2*PI*damping_profile )/2-0.5);    
-    // --------------------------------------------------------------------------------------- //
-
-    
-    // ================================= theta_ref ================================== //
-    //Eigen::ArrayXd theta_ref(sizeof(tt)/sizeof(float));
-    theta_ref = dy_ref.binaryExpr(dx_ref, std::ptr_fun(::atan2));  //atan2 with array       
-    theta_ref.segment(0, start_point+1) = atan2(dy_ref[start_point+1], dx_ref[start_point+1]) * Eigen::ArrayXd::Ones(start_point+1);    
-    theta_ref.segment(sizeof(tt)/sizeof(float)-(start_point+1), start_point+1) = atan2(dy_ref[sizeof(tt)/sizeof(float)-(start_point+1)], dx_ref[sizeof(tt)/sizeof(float)-(start_point+1)]) * Eigen::ArrayXd::Ones(start_point+1);    
-    
-    //unwrap    
-    for (int kk = 0; kk <sizeof(tt)/sizeof(float); ++kk)
-        //unwrap(theta_ref[kk], theta_refa[kk]); //trash output
-        if (theta_ref[kk] > -1.5) theta_ref[kk] = theta_ref[kk]-2*PI; //manually unwrap...
-    // --------------------------------------------------------------------------------------- //
-
-    
-    // ================================= x_ref & y_ref ================================== //
-    //Eigen::ArrayXd x_ref(sizeof(tt)/sizeof(float)), y_ref(sizeof(tt)/sizeof(float));
-    x_ref.setZero(sizeof(tt)/sizeof(float)); y_ref.setZero(sizeof(tt)/sizeof(float));           
-    for (int i = 0; i <sizeof(tt)/sizeof(float)-1; ++i) {
-        x_ref[i+1] = x_ref[i] + dx_ref[i+1] * T;
-        y_ref[i+1] = y_ref[i] + dy_ref[i+1] * T;
-    }
-    // --------------------------------------------------------------------------------------- //
-
-
-    // ================================= ddx_ref & ddy_ref ================================== //
-    //Eigen::ArrayXd ddx_ref(sizeof(tt)/sizeof(float)), ddy_ref(sizeof(tt)/sizeof(float));
-    ddx_ref.setZero(sizeof(tt)/sizeof(float)); ddy_ref.setZero(sizeof(tt)/sizeof(float));           
-    for (int i = 0; i <sizeof(tt)/sizeof(float)-1; ++i) {
-        ddx_ref[i+1] = (dx_ref[i+1]-dx_ref[i])/T;
-        ddy_ref[i+1] = (dy_ref[i+1]-dy_ref[i])/T;
-    }
-    // --------------------------------------------------------------------------------------- //
-
-
-    // ================================= dtheta_ref & ddtheta_ref ================================== //
-    //Eigen::ArrayXd dtheta_ref(sizeof(tt)/sizeof(float)), ddtheta_ref(sizeof(tt)/sizeof(float));
-    dtheta_ref.setZero(sizeof(tt)/sizeof(float)); ddtheta_ref.setZero(sizeof(tt)/sizeof(float));           
-    for (int i = 0; i <sizeof(tt)/sizeof(float)-1; ++i) {
-        dtheta_ref[i+1] = (theta_ref[i+1]-theta_ref[i])/T;
-        ddtheta_ref[i+1] = (dtheta_ref[i+1]-dtheta_ref[i])/T;
-    }    
-    // --------------------------------------------------------------------------------------- //
-
-
-    // ================================= insert to global variables ================================== //
-    xr << x_ref, y_ref, theta_ref;
-    ur << dx_ref, dy_ref, dtheta_ref;
-    ddxr << ddx_ref, ddy_ref, ddtheta_ref;
-    // --------------------------------------------------------------------------------------- //
-
-
-    // ================================= print ================================== //            
-    for (int kk = 0 ; kk < sizeof(tt)/sizeof(float); ++kk) {
-        Serial.print(xr(kk,0)); Serial.print(" ");
-        Serial.print(xr(kk,1)); Serial.print(" ");
-        Serial.println(xr(kk,2)); 
-    }    
-
-    for (int kk = 0 ; kk < sizeof(tt)/sizeof(float); ++kk) {
-        Serial.print(x_ref(kk)); Serial.print(" ");
-        Serial.print(y_ref(kk)); Serial.print(" ");
-        Serial.print(theta_ref(kk)); Serial.print(" ");        
-
-        Serial.print(dx_ref(kk)); Serial.print(" ");
-        Serial.print(dy_ref(kk)); Serial.print(" ");
-        Serial.print(dtheta_ref(kk)); Serial.print(" ");        
-
-        Serial.print(ddx_ref(kk)); Serial.print(" ");
-        Serial.print(ddy_ref(kk)); Serial.print(" ");
-        Serial.println(ddtheta_ref(kk));
-    }    
-    // --------------------------------------------------------------------------------------- //    
-}
-*/
-
-
-
-
-
-    

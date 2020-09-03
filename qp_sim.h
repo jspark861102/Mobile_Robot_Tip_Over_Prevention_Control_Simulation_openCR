@@ -12,14 +12,15 @@
 #include <ref_ur.h>
 #include <ref_ddxr.h>
 
-
 #define round(x) ((x)>=0?(long)((x)+0.5):(long)((x)-0.5))
 
 #define DEBUG
+
 #define PI 3.14159265359
 #define g 9.81
 #define T 0.01 //sampling time
 #define dt 0.01 //sampling time
+#define SAMPLING_RATE 20 //msec
 // ================================= Operation Parameters ================================== //    
 #define MODEL_SWITCH  2 //model, 1:nonlinear model, 2:linear model          
 #define REF_TRAJ_SWITCH 2 //reference trajectory, 1:wv, 2:xy                
@@ -34,7 +35,7 @@
 #define h 0.6 // height of mass center
 
 // ================================= MPC Control Parameters ================================== //    
-#define N 10 //Batch size
+#define N 2 //Batch size
 
 #define n 3 //number of states
 #define m 3 //number of inputs
@@ -43,11 +44,11 @@
 #define Rs 1 //input weight
 
 //input constraint
-float input_const_mag = 2.0;
+double input_const_mag = 2.0;
 Eigen::Matrix<double, n*2, 1> thr_input;    
 
 //state constraint
-float state_const_mag = 0.008;
+double state_const_mag = 0.008;
 Eigen::Matrix<double, n*2, 1> thr_state;    
 
 //slip constraint
@@ -56,12 +57,14 @@ Eigen::Matrix<double, n, 1> mu;
 //initial state : [x y theta]
 Eigen::Matrix<double, n, 1> x0;    
 
-float Df, Dr, Lf, Lr;
+double Df, Dr, Lf, Lr;
 
 qpOASES::Options options;
 qpOASES::int_t nWSR = 100;
+qpOASES::returnValue rvalue;
 
 //states//
+Eigen::Matrix<double, n, 1> xr0;    
 Eigen::Matrix<double, n, 1> x0_tilt;
 Eigen::Matrix<double, m, 1> u_tilt;
 Eigen::Matrix<double, n, 1> x_tilt_current;
@@ -115,12 +118,6 @@ uint8_t trigger = 0;
 uint8_t init_case = 1;
 
 // ================================= functions ================================== //    
-//void ref_trajectory_mecanum_xy(void);
-inline double constrainAngle(double x);
-inline double angleConv(double angle);
-inline double angleDiff(double a,double b);
-inline double unwrap(double previousAngle,double newAngle);
-
 Eigen::Matrix3d A_from_ref(double dx_ref_index, double dy_ref_index, double theta_ref_index);
 Eigen::Matrix3d B_from_ref(Eigen::ArrayXd theta_ref);
 
